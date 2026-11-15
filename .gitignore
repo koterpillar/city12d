@@ -1,0 +1,5 @@
+/data/
+/vendor/
+/visualization-check.png
+__pycache__/
+*.tmp

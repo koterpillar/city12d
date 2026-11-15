@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portland transit in space-time</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+    body { margin: 0; overflow: hidden; background: #061019; color: #e8f3ff; }
+    canvas { display: block; }
+    .panel {
+      position: fixed;
+      z-index: 2;
+      max-width: min(24rem, calc(100vw - 2rem));
+      padding: 1rem;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: .75rem;
+      background: rgba(4,12,20,.78);
+      backdrop-filter: blur(.5rem);
+    }
+    #intro { top: 1rem; left: 1rem; }
+    #legend { bottom: 1rem; left: 1rem; padding: .75rem; font-size: .82rem; }
+    h1 { margin: 0 0 .45rem; font-size: 1.15rem; line-height: 1.2; }
+    p { margin: .35rem 0; font-size: .86rem; line-height: 1.45; color: #c8dcea; }
+    .hint { color: #91a9ba; }
+    .gradient {
+      width: 100%; height: .65rem; margin: .45rem 0 .2rem;
+      background: linear-gradient(90deg, #ff7043, #ffd54f, #26a69a);
+    }
+    .range { display: flex; justify-content: space-between; color: #91a9ba; }
+    .axis { display: grid; gap: .2rem; margin-top: .55rem; }
+    .axis span { font-size: .78rem; color: #a9c2d2; }
+    #status { position: fixed; top: 1rem; right: 1rem; z-index: 2; font-size: .8rem; color: #c8dcea; }
+    #tooltip {
+      position: fixed; z-index: 3; display: none;
+      max-width: 22rem; padding: .6rem .7rem; pointer-events: none;
+      border: 1px solid rgba(255,255,255,.16); border-radius: .45rem;
+      background: rgba(3,10,17,.94); font-size: .78rem; line-height: 1.45;
+      white-space: pre-line;
+    }
+    #tooltip strong { display: block; margin-bottom: .15rem; }
+    .axis-label {
+      position: fixed; z-index: 1; display: none; color: #d7ecff;
+      font-size: .72rem; text-shadow: 0 1px 4px #000; pointer-events: none;
+    }
+    @media (max-width: 640px) {
+      #intro { max-height: 45vh; overflow: auto; }
+      #legend { display: none; }
+    }
+  </style>
+</head>
+body>
+  <div id="intro" class="panel">
+    <h1>Portland public transport in space-time</h1>
+    <p>Horizontal position is longitude and latitude. The vertical axis is scheduled time. A line covering more ground in less time is flatter.</p>
+    <p class="hint">Drag to orbit, scroll to zoom, and hover a route for details.</p>
+  </div>
+  <div id="legend" class="panel">
+    <strong>Average scheduled speed</strong>
+    <div class="gradient" aria-hidden="true"></div>
+    <div class="range"><span>slow</span><span>fast</span></div>
+    <div class="axis">
+      <span>Red arrow: time, later upward</span>
+      <span>Blue arrow: east</span>
+      <span>Green arrow: north</span>
+    </div>
+  </div>
+  <div id="status">Loading TriMet schedule…</div>
+  <div id="tooltip"></div>
+  <label class="axis-label" id="time-label">time</label>
+  <label class="axis-label" id="east-label">east</label>
+  <label class="axis-label" id="north-label">north</label>
+
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from './vendor/OrbitControls.js';
+
+    const status = document.querySelector('#status');
+    let data;
+    try {
+      const response = await fetch('./data/portland-space-time.json');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      data = await response.json();
+    } catch (error) {
+      status.textContent = 'Could not load data. Run: python3 -m http.server 8000';
+      console.error(error);
+      throw error;
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#061019');
+    scene.fog = new THREE.Fog('#061019', 190, 430);
+
+    const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, .1, 1000);
+    camera.position.set(118, 88, 142);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.domElement.setAttribute('role', 'img');
+    renderer.domElement.setAttribute('aria-label', 'Three-dimensional map of Portland transit trips by longitude, latitude, and time');
+    document.body.prepend(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 48, 0);
+    controls.enableDamping = true;
+    controls.minDistance = 55;
+    controls.maxDistance = 390;
+    controls.maxPolarAngle = 1.48;
+
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, maxTime = 0;
+    for (const trip of data.trips) {
+      const points = trip.points;
+      for (let i = 0; i < points.length; i += 3) {
+        minX = Math.min(minX, points[i]);
+        maxX = Math.max(maxX, points[i]);
+        minZ = Math.min(minZ, points[i + 2]);
+        maxZ = Math.max(maxZ, points[i + 2]);
+        maxTime = Math.max(maxTime, points[i + 1]);
+      }
+    }
+    const midX = (minX + maxX) / 2;
+    const midZ = (minZ + maxZ) / 2;
+    const horizontalScale = 108 / Math.max(maxX - minX, maxZ - minZ);
+    const timeScale = 100 / maxTime;
+
+    function speedColor(speed) {
+      const stops = [
+        [8, new THREE.Color('#ff7043')],
+        [20, new THREE.Color('#ffd54f')],
+        [45, new THREE.Color('#26a69a')],
+      ];
+      if (speed <= stops[0][0]) return stops[0][1];
+      for (let i = 1; i < stops.length; i++) {
+        if (speed <= stops[i][0]) {
+          const [fromSpeed, fromColor] = stops[i - 1];
+          const [toSpeed, toColor] = stops[i];
+          return fromColor.clone().lerp(toColor, (speed - fromSpeed) / (toSpeed - fromSpeed));
+        }
+      }
+      return stops.at(-1)[1];
+    }
+
+    const segmentCount = data.trips.reduce((total, trip) => total + trip.points.length / 3 - 1, 0);
+    const positions = new Float32Array(segmentCount * 6);
+    const colors = new Float32Array(segmentCount * 6);
+    const segmentOwners = new Uint16Array(segmentCount);
+    let segment = 0;
+    for (const [tripIndex, trip] of data.trips.entries()) {
+      const color = speedColor(trip.speedKph);
+      const points = trip.points;
+      for (let i = 0; i < points.length - 3; i += 3) {
+        const x1 = (points[i] - midX) * horizontalScale;
+        const y1 = points[i + 1] * timeScale;
+        const z1 = (points[i + 2] - midZ) * horizontalScale;
+        const x2 = (points[i + 3] - midX) * horizontalScale;
+        const y2 = (points[i + 4] * timeScale);
+        const z2 = (points[i + 5] - midZ) * horizontalScale;
+        positions.set([x1, y1, z1, x2, y2, z2], segment * 6);
+        colors.set([color.r, color.g, color.b, color.r, color.g, color.b], segment * 6);
+        segmentOwners[segment] = tripIndex;
+        segment++;
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const transit = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: .43, blending: THREE.AdditiveBlending,
+    }));
+    scene.add(transit);
+
+    for (let seconds = 0; seconds <= maxTime; seconds += 1800) {
+      const grid = new THREE.GridHelper(122, 12, 0x355a70, 0x1d394a);
+      grid.position.y = seconds * timeScale;
+      grid.material.transparent = true;
+      grid.material.opacity = seconds === 0 ? .23 : .065;
+      scene.add(grid);
+    }
+
+    const axisOrigin = new THREE.Vector3(-58, 0, 48);
+    scene.add(new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), axisOrigin, 22, 0xff5252, 6, 3));
+    scene.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), axisOrigin, 18, 0x64b5f6, 5, 3));
+    scene.add(new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), axisOrigin, 18, 0x81c784, 5, 3));
+    const labels = [
+      [document.querySelector('#east-label'), axisOrigin.clone().add(new THREE.Vector3(20, 1, 0))],
+      [document.querySelector('#north-label'), axisOrigin.clone().add(new THREE.Vector3(0, 1, -20))],
+    ];
+    const timeLabel = document.querySelector('#time-label');
+    timeLabel.textContent = 'time ↑';
+    labels.push([timeLabel, axisOrigin.clone().add(new THREE.Vector3(2, 27, 0))]);
+    const endHour = Math.floor(maxTime / 3600) + 7;
+    for (let hour = 7; hour <= endHour; hour++) {
+      const label = document.createElement('label');
+      label.className = 'axis-label';
+      label.textContent = `${String(hour).padStart(2, '0')}:00`;
+      document.body.append(label);
+      labels.push([label, axisOrigin.clone().add(new THREE.Vector3(-3, (hour - 7) * 3600 * timeScale, 2))]);
+    }
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line.threshold = .28;
+    const pointer = new THREE.Vector2();
+    const tooltip = document.querySelector('#tooltip');
+    let lastHover = 0;
+    renderer.domElement.addEventListener('pointermove', event => {
+      pointer.set((event.clientX / innerWidth) * 2 - 1, -(event.clientY / innerHeight) * 2 + 1);
+      tooltip.style.left = `${Math.min(event.clientX + 14, innerWidth - 230)}px`;
+      tooltip.style.top = `${Math.min(event.clientY + 14, innerHeight - 120)}px`;
+      const now = performance.now();
+      if (now - lastHover < 90 || event.buttons) return;
+      lastHover = now;
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObject(transit, false)[0];
+      if (!hit || hit.index === undefined) {
+        tooltip.style.display = 'none';
+        return;
+      }
+      const trip = data.trips[segmentOwners[hit.index / 2]];
+      const heading = document.createElement('strong');
+      heading.textContent = trip.route;
+      tooltip.replaceChildren(
+        heading,
+        document.createTextNode(`${trip.headsign}\n${trip.startTime}–${trip.endTime} · ${trip.speedKph} km/h · ${trip.distanceKm} km\n${trip.start} → ${trip.end}`),
+      );
+      tooltip.style.display = 'block';
+    });
+    renderer.domElement.addEventListener('pointerleave', () => tooltip.style.display = 'none');
+
+    const projected = new THREE.Vector3();
+    function render() {
+      controls.update();
+      renderer.render(scene, camera);
+      for (const [element, position] of labels) {
+        projected.copy(position).project(camera);
+        const visible = projected.z < 1;
+        element.style.display = visible ? 'block' : 'none';
+        element.style.left = `${(projected.x * .5 + .5) * innerWidth}px`;
+        element.style.top = `${(-projected.y * .5 + .5) * innerHeight}px`;
+      }
+    }
+    renderer.setAnimationLoop(render);
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    status.textContent = `${data.meta.tripCount.toLocaleString()} trips · ${data.meta.departureWindow} · ${data.meta.serviceDate}`;
+  </script>
+</body>
+</html>
